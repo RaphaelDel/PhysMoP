@@ -33,7 +33,7 @@ class evaluator(nn.Module):
                                        fusion=True
                                        ).to(self.device)
 
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model'], strict=True)
         self.model.eval()
 
@@ -67,7 +67,7 @@ class evaluator(nn.Module):
 
         return vertices, joints, joints_smpl, rotMat_individual
 
-    def forward(self, data_test, input_type='numpy'):
+    def forward(self, data_test, input_type='numpy', dataset_name=None):
 
         mode = 'test'
         if input_type == 'numpy':
@@ -131,7 +131,7 @@ class evaluator(nn.Module):
         pred_pose_fusion = pred_pose_fusion.reshape([process_size_test, 72])
         pred_vertices_fusion, pred_joints_fusion, pred_joints_smpl_fusion, _ = self.forward_kinematics(pred_pose_fusion, gt_shape, gt_gender_id, process_size_test, joints_smpl=True, vertices=True)
 
-        if config.test_mode == 'H36M':
+        if (dataset_name or config.test_mode) == 'H36M':
             gt_J = torch.cat([gt_joints, gt_joints[:, 8:9], gt_joints[:, 8:9],
                             gt_joints[:, 13:14], gt_joints[:, 16:17],
                             gt_joints_smpl[:, 22:23], gt_joints_smpl[:, 22:23], gt_joints_smpl[:, 22:23], 

@@ -116,35 +116,48 @@ class SMPL(object):
 class SMPLH(object):
     def __init__(self, gender='neutral', num_betas=10, device=None):
         super(SMPLH, self).__init__()
-        # -- Load SMPL params --        
         if gender == 'male':
-            params = np.load(config.SMPLH_M_PATH)
+            model_path = config.SMPLH_M_PATH
         elif gender == 'female':
-            params = np.load(config.SMPLH_F_PATH)
+            model_path = config.SMPLH_F_PATH
         else:
-            params = np.load(config.SMPLH_N_PATH)
-        # Mean template vertices: [6890, 3]
-        self.v_template = torch.from_numpy(params['v_template']).type(torch.float32)
-        self.faces = params['f']
-        # joint regressor of the official model
-        with open(config.SMPL_MODEL_PATH, 'rb') as f:
-            params_smpl = pickle.load(f)
-        # 24 and 37
-        self.regressor = torch.from_numpy(params_smpl['V_regressor']).type(torch.float32).transpose(1, 0)
-        self.J_regressor = torch.from_numpy(params_smpl['J_regressor']).type(torch.float32).transpose(1, 0)
-        # Parent for 24 and 37
-        self.parents = params_smpl['kintree_table'].astype(np.int32)
-        self.J_parents = params_smpl['kintree_table_J'].astype(np.int32)
+            model_path = config.SMPLH_N_PATH
 
-        # transposed to [10, 6890, 3]
-        self.shapedirs = torch.from_numpy(params['shapedirs'].transpose(2,0,1)).type(torch.float32)[:num_betas]
-        # Pose blend shape basis: [6890, 3, 207]
-        # transposed to [207, 6890, 3]
-        self.posedirs = torch.from_numpy(params['posedirs'].transpose(2,0,1)).type(torch.float32)[:9*21]
-        # LBS weights [6890, 24]
-        self.weights = torch.from_numpy(params['weights_prior']).type(torch.float32)
         self.joints_num = 24
         self.verts_num = 6890
+        with np.load(model_path) as params:
+            template = params['v_template']
+            if template.shape != (self.verts_num, 3):
+                raise ValueError(
+                    f'{model_path} has a {template.shape} template. '
+                    'Use the 6890-vertex Extended SMPL+H model from the MANO download page.'
+                )
+            self.v_template = torch.from_numpy(template).float()
+            self.faces = params['f']
+            self.shapedirs = torch.from_numpy(params['shapedirs'].transpose(2, 0, 1)).float()[:num_betas]
+            self.posedirs = torch.from_numpy(params['posedirs'].transpose(2, 0, 1)).float()[:9 * 21]
+
+            weights = params.get('weights_prior')
+            if weights is None or weights.shape != (self.verts_num, self.joints_num):
+                full_weights = params.get('weights')
+                if full_weights is None or full_weights.shape != (self.verts_num, 52):
+                    raise ValueError(f'{model_path} needs 24-joint weights_prior or 52-joint SMPL-H weights.')
+                # PhysMoP has one slot per hand. With fixed finger rotations, all
+                # 15 finger joints on each hand share the same skinning transform.
+                weights = np.concatenate((
+                    full_weights[:, :22],
+                    full_weights[:, 22:37].sum(axis=1, keepdims=True),
+                    full_weights[:, 37:52].sum(axis=1, keepdims=True),
+                ), axis=1)
+            self.weights = torch.from_numpy(weights).float()
+
+        # Load the joint regressors from the processed neutral SMPL model.
+        with open(config.SMPL_MODEL_PATH, 'rb') as f:
+            params_smpl = pickle.load(f)
+        self.regressor = torch.from_numpy(params_smpl['V_regressor']).type(torch.float32).transpose(1, 0)
+        self.J_regressor = torch.from_numpy(params_smpl['J_regressor']).type(torch.float32).transpose(1, 0)
+        self.parents = params_smpl['kintree_table'].astype(np.int32)
+        self.J_parents = params_smpl['kintree_table_J'].astype(np.int32)
 
         self.device = device if device is not None else torch.device('cpu')
         for name in ['v_template', 'J_regressor', 'regressor', 'weights', 

@@ -1,0 +1,4 @@
+dataset/data_processed/
+dataset/dataset_raw/
+
+*.pyc

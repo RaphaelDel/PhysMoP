@@ -23,7 +23,8 @@ import constants
 class Trainer(BaseTrainer):
     
     def init_fn(self):
-        self.train_ds = MixedDataset(hist_length=config.hist_length, dataset_name='AMASS')
+        dataset_name = getattr(self.options, 'dataset', 'AMASS')
+        self.train_ds = MixedDataset(hist_length=config.hist_length, dataset_name=dataset_name)
         
         self.model = PhysMoP(hist_length=config.hist_length,
                                        physics=self.options.physics,
@@ -38,7 +39,12 @@ class Trainer(BaseTrainer):
         self.smplh_m = SMPLH(gender='male', device=self.device)
         self.smplh_f = SMPLH(gender='female', device=self.device)
 
-        self.lr_scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, self.options.checkpoint_steps//2, gamma=0.95, last_epoch=-1)
+        lr_step_size = getattr(self.options, 'lr_step_size', None)
+        if lr_step_size is None:
+            lr_step_size = max(1, self.options.checkpoint_steps // 2)
+        self.lr_scheduler = torch.optim.lr_scheduler.StepLR(
+            self.optimizer, step_size=lr_step_size, gamma=getattr(self.options, 'lr_gamma', 0.95)
+        )
 
         self.criterion_mae = nn.L1Loss().to(self.device)
         self.criterion_mse = nn.MSELoss(reduction='none').to(self.device)
@@ -184,7 +190,7 @@ class Trainer(BaseTrainer):
         fig = plt.figure(figsize=(12,12), dpi=100)
         fig.suptitle('Pred and Label motion over time')
         q_idx = [6,7,8]
-        num_vis = 2
+        num_vis = min(2, len(output['gt_q']))
 
         for i in range(num_vis):
             for j, q_i in enumerate(q_idx):

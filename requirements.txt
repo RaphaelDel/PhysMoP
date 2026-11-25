@@ -4,3 +4,9 @@ torchvision
 pyrender
 trimesh
 opencv-python
+easydict
+einops
+scipy
+tqdm
+matplotlib
+tensorboard

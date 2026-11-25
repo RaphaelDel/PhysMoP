@@ -40,7 +40,7 @@ class BaseTrainer(object):
         This is different from resuming training using --resume.
         """
         if checkpoint_file is not None:
-            checkpoint = torch.load(checkpoint_file)
+            checkpoint = torch.load(checkpoint_file, map_location=self.device)
             for model in self.models_dict:
                 if model in checkpoint:
                     self.models_dict[model].load_state_dict(checkpoint[model], strict=False)

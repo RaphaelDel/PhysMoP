@@ -1,114 +1,75 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
+import argparse
+from pathlib import Path
 
 import numpy as np
-import os 
-import argparse
+import torch
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-
-from dataset.base_dataset_test import BaseDataset_test
-
-from models.evaluator import evaluator
-from models.PhysMoP import PhysMoP
-from models.humanmodel import SMPL, SMPLH
-
-from utils.utils import compute_errors, batch_roteulerSMPL, remove_singlular_batch
 
 import config
 import constants
+from dataset.base_dataset_test import BaseDataset_test
+from models.evaluator import evaluator
 
-def run_evaluation(evaluator_ode, checkpoint, restart, batch_size, seqlen=16):
-    """Run evaluation on the datasets and metrics we report in the paper. """
 
-    logpath = os.path.join(checkpoint.split('checkpoints')[0])
-    logpath = os.path.join(logpath, 'eval')
-    if not os.path.exists(logpath):
-        os.makedirs(logpath)
+def run_evaluation(evaluator_ode, checkpoint, dataset_names, batch_size, num_workers):
+    log_dir = checkpoint.parent
+    if log_dir.name == 'checkpoints':
+        log_dir = log_dir.parent
 
-    # Load SMPL model
-    smpl = SMPL(device=device)
-    smplh_m = SMPLH(gender='male', device=device)
-    smplh_f = SMPLH(gender='female', device=device)
+    for name in dataset_names:
+        print(f'Evaluating {name}')
+        dataset = BaseDataset_test(name, config.DATASET_FOLDERS_TEST, config.hist_length)
+        if not len(dataset):
+            raise ValueError(f'The {name} test index contains no windows')
+        data_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers)
 
-    datasetname = [i for i in config.DATASET_FOLDERS_TEST.keys()]
-    evaluation = {}
-
-    for ds in datasetname:
-        print('Evaluating: ' + ds)
-        filepath = os.path.join(logpath, ds)
-        if not os.path.exists(filepath):
-            os.makedirs(filepath)
-
-        # Create dataloader for the dataset
-        data_loader = DataLoader(dataset=BaseDataset_test(ds, config.DATASET_FOLDERS_TEST, config.hist_length),
-                                batch_size=batch_size,
-                                shuffle=False,
-                                num_workers=8)
-        N_dataset = len(BaseDataset_test(ds, config.DATASET_FOLDERS_TEST, config.hist_length))
-        N = N_dataset 
-
-        mpjpe_data = np.zeros([N, config.total_length])
-        mpjpe_physics = np.zeros([N, config.total_length])
-        mpjpe_fusion = np.zeros([N, config.total_length])
-
-        accl_data = []
-        accl_physics = []
-        accl_fusion = []
-
-        time_idx = [1, 3, 7, 9, 13, 17, 21, 24]
-
-        img_paths_all = []
-        process_size = batch_size * seqlen
+        branches = ('data', 'physics', 'fusion')
+        mpjpe_batches = {branch: [] for branch in branches}
+        accel_batches = {branch: [] for branch in branches}
         with torch.no_grad():
-            im = 0
-            for step, batch in enumerate(tqdm(data_loader, desc='Eval', total=len(data_loader))):
-                # Get ground truth annotations from the batch
-                input_batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k,v in batch.items()}
-                batch_size_s = input_batch['q'].shape[0]
-                process_size_s = batch_size_s * seqlen
+            for batch in tqdm(data_loader, desc='Eval'):
+                batch = {key: value.to(evaluator_ode.device) for key, value in batch.items()}
+                _, metrics = evaluator_ode(batch, 'torch', dataset_name=name)
+                for branch, mpjpe, accel in zip(branches, metrics[:3], metrics[3:6]):
+                    mpjpe_batches[branch].append(mpjpe)
+                    accel_batches[branch].append(accel)
 
-                _, eval_metrics = evaluator_ode.forward(input_batch, 'torch')
-                error_test_data, error_test_physics, error_test_fusion, error_accel_data, error_accel_physics, error_accel_fusion, _, _, _ = eval_metrics
+        mpjpe = {branch: np.concatenate(batches) for branch, batches in mpjpe_batches.items()}
+        future = {branch: values[:, config.hist_length:].mean(axis=0) for branch, values in mpjpe.items()}
+        print(f'*** Final results for {name} ***')
+        for frames in (2, 4, 8, 10, 14, 18, 22, 25):
+            print(f'Evaluation at {round(frames * constants.dt * 1000)} ms')
+            for branch in branches:
+                print(f'MPJPE_{branch}: {future[branch][frames - 1]:.1f} mm')
+                if name == 'H36M':
+                    print(f'MPJPE_{branch} (P2): {future[branch][:frames].mean():.1f} mm')
+        for branch in branches:
+            # The first acceleration value is centered at the second input frame.
+            accel = np.concatenate(accel_batches[branch])[:, config.hist_length - 1:]
+            print(f'ACCEL_{branch}: {accel.mean():.1f}')
 
-                mpjpe_data[step * batch_size :step * batch_size + batch_size_s] = error_test_data
-                mpjpe_physics[step * batch_size :step * batch_size + batch_size_s] = error_test_physics
-                mpjpe_fusion[step * batch_size :step * batch_size + batch_size_s] = error_test_fusion
+        output = log_dir / 'eval' / name
+        output.mkdir(parents=True, exist_ok=True)
+        np.savez(output / 'results.npz', **{f'mpjpe_{branch}': values for branch, values in mpjpe.items()})
 
-                accl_data.append(error_accel_data)
-                accl_physics.append(error_accel_physics)
-                accl_fusion.append(error_accel_fusion)
-
-        print('*** Final Results ***')
-        print()
-        print(ds)
-        for idx in time_idx:
-            print('Evaluation at Time %dms' % ((idx+1)*40))
-            print('MPJPE_data: %.1fmm' % mpjpe_data.mean(axis=0)[idx+config.hist_length])
-            print('MPJPE_physics: %.1fmm' % mpjpe_physics.mean(axis=0)[idx+config.hist_length])
-            print('MPJPE_fusion: %.1fmm' % mpjpe_fusion.mean(axis=0)[idx+config.hist_length])
-            print()
-        accl_data = np.concatenate(error_accel_data, axis=0)[config.hist_length:]
-        accl_physics = np.concatenate(error_accel_physics, axis=0)[config.hist_length:]
-        accl_fusion = np.concatenate(error_accel_fusion, axis=0)[config.hist_length:]
-        print('ACCEL_data: %.1f' % np.mean(accl_data))
-        print('ACCEL_physics: %.1f' % np.mean(accl_physics))
-        print('ACCEL_fusion: %.1f' % np.mean(accl_fusion))
-        print()
-        np.savez(os.path.join(filepath, 'results.npz'), mpjpe_data=mpjpe_data)
-
-# Define command-line arguments
-parser = argparse.ArgumentParser()
-parser.add_argument('--checkpoint', default=None, help='Path to network checkpoint')
 
 if __name__ == '__main__':
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--checkpoint', type=Path, required=True, help='Path to network checkpoint')
+    parser.add_argument('--dataset', choices=config.DATASET_FOLDERS_TEST, help='Evaluate one dataset')
+    parser.add_argument('--batch-size', type=int, default=224)
+    parser.add_argument('--num-workers', type=int, default=0)
     args = parser.parse_args()
 
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    evaluator_ode = evaluator(checkpoint_path=args.checkpoint)
+    dataset_names = (args.dataset,) if args.dataset else config.DATASET_FOLDERS_TEST
+    if not args.checkpoint.is_file():
+        parser.error(f'Checkpoint not found: {args.checkpoint}')
+    for name in dataset_names:
+        test_index = Path(config.DATASET_FOLDERS_TEST[name])
+        if not test_index.is_file():
+            parser.error(f'Missing {name} test index: {test_index}')
 
-    # Run evaluation
-    run_evaluation(evaluator_ode, args.checkpoint, False, batch_size=224, seqlen=config.total_length)
+    evaluator_ode = evaluator(checkpoint_path=args.checkpoint)
+    run_evaluation(evaluator_ode, args.checkpoint, dataset_names, args.batch_size, args.num_workers)
 

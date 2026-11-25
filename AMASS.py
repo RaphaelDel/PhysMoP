@@ -22,11 +22,7 @@ import os.path as osp
 from tqdm import tqdm
 
 import numpy as np
-import torch
-device = torch.device('cpu')
-
-from utils.utils import batch_rodrigues, rotmat2eulerzyx, rotmat2euleryzx, rotmat2eulerzxy
-from scipy.ndimage import gaussian_filter1d, median_filter
+from dataset.motion_preprocessing import smpl_to_generalized_coordinates
 
 # %%
 def read_data(trunk_datafolder, trunk_path, folder, sequences, seqlen, overlap=0.75, fps=30):
@@ -66,44 +62,10 @@ def read_sequence(trunk_datafolder, trunk_path, folder, seq_name, fps, seqlen, o
             # pose       
             sampling_freq = mocap_framerate // fps
             pose = data['poses'][::sampling_freq]
-            pose = torch.from_numpy(pose[:, :22*3]).type(torch.float32).to(device)
-            rotmat = batch_rodrigues(pose.view(-1,1,3)).view(-1,22,3,3)
-
-            if pose.shape[0] < 80:
+            if len(pose) < 80:
                 continue
 
-            euler_root = rotmat2euleryzx(rotmat[:,:1,:,:].clone().view(-1,3,3)).view(-1,1,3)
-            euler_s = rotmat2eulerzyx(rotmat[:,1:16,:,:].clone().view(-1,3,3)).view(-1,15,3)
-            euler_shoulder = rotmat2eulerzxy(rotmat[:,16:18,:,:].clone().view(-1,3,3)).view(-1,2,3)
-            euler_elbow = rotmat2euleryzx(rotmat[:,18:20,:,:].clone().view(-1,3,3)).view(-1,2,3)
-            euler_e = rotmat2eulerzyx(rotmat[:,20:,:,:].clone().view(-1,3,3)).view(-1,2,3)
-
-            euler = torch.cat((euler_root,euler_s,euler_shoulder,euler_elbow,euler_e), dim=1).detach().numpy()
-            euler = np.delete(euler, [9,10], 1).reshape([-1,20*3])
-
-            euler_smooth = euler.copy()
-            for angle in range(euler.shape[1]):
-                for t in range(euler.shape[0]-1):
-                    while np.abs(euler[t+1,angle]-euler[t,angle])>np.pi:
-                        if euler[t+1,angle]<euler[t,angle]:
-                            euler[t+1,angle] = euler[t+1,angle] + 2*np.pi
-                        else:
-                            euler[t+1,angle] = euler[t+1,angle] - 2*np.pi
-                euler_smooth[:,angle] = median_filter(euler[:,angle], smooth_sigma//2)
-                euler_smooth[:,angle] = gaussian_filter1d(euler_smooth[:,angle].copy(), smooth_sigma) 
-    
-            # generalized position
-            trans = data['trans'][::sampling_freq]
-            for i in range(3):
-                trans[:, i] = median_filter(trans[:, i], smooth_sigma_va//2)
-                trans[:, i] = gaussian_filter1d(trans[:, i], smooth_sigma_va)
-                
-            q = np.concatenate([trans, euler_smooth], axis=1)[15:-15]
-            q[:,3:] = np.remainder(q[:,3:], 2*np.pi)
-    
-            q_pose = q[:,3:].copy()
-            q_pose[q_pose>np.pi] = q_pose[q_pose>np.pi] - 2*np.pi
-            q[:,3:] = q_pose
+            q = smpl_to_generalized_coordinates(pose, data['trans'][::sampling_freq])
 
             # shape and gender
             shape = np.repeat(data['betas'][:10][np.newaxis], q.shape[0], axis=0)
@@ -128,9 +90,6 @@ amass_dir = './dataset/data_raw/AMASS'
 save_dir = './dataset/data_processed'
 seqlen = 50
 
-smooth_sigma = 6
-smooth_sigma_va = 8
-    
 for split in ['test', 'train']:
     if split == 'train':
         overlap = 9/10

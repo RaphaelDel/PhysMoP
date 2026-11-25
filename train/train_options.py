@@ -13,6 +13,7 @@ class TrainOptions():
 
         req = self.parser.add_argument_group('Required')
         req.add_argument('--name', required=True, help='Name of the experiment')
+        req.add_argument('--dataset', choices=('AMASS', 'H36M'), default='AMASS', help='Training dataset')
 
         gen = self.parser.add_argument_group('General')
         gen.add_argument('--time_to_run', type=int, default=np.inf, help='Total time to run in seconds. Used for training in environments with timing constraints')
@@ -39,6 +40,8 @@ class TrainOptions():
         train = self.parser.add_argument_group('Training Options')
         train.add_argument('--num_epochs', type=int, default=5, help='Total number of training epochs')
         train.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+        train.add_argument('--lr_step_size', type=int, help='Optimizer steps between learning rate decays')
+        train.add_argument('--lr_gamma', type=float, default=0.95, help='Learning rate decay multiplier')
         train.add_argument('--batch_size', type=int, default=64, help='Batch size')
         train.add_argument('--summary_steps', type=int, default=500, help='Summary saving frequency')
         train.add_argument('--checkpoint_steps', type=int, default=5000, help='Checkpoint saving frequency')
